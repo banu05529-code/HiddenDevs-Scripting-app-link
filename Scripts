@@ -1,0 +1,1129 @@
+FPS Camera script - The script which is used for the first person perspective.
+
+
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+
+local function updateCamera()
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local tool = character:FindFirstChildOfClass("Tool")
+
+	if tool then
+		player.CameraMode = Enum.CameraMode.LockFirstPerson
+	else
+		player.CameraMode = Enum.CameraMode.Classic
+	end
+end
+
+local function setupCharacter(character)
+	player.CameraMode = Enum.CameraMode.Classic
+
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			updateCamera()
+		end
+	end)
+
+	character.ChildRemoved:Connect(function(child)
+		if child:IsA("Tool") then
+			updateCamera()
+		end
+	end)
+
+	updateCamera()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+
+FPSWeapons script used for the shooting projectiles, sounds and animations (partially for animations)
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local fpsSystem = ReplicatedStorage:WaitForChild("FPSSystem")
+local shootEvent = fpsSystem:WaitForChild("Shoot")
+local reloadEvent = fpsSystem:WaitForChild("Reload")
+
+local equippedTool = nil
+local function playGunSound(tool, soundName)
+	local handle = tool:FindFirstChild("Handle")
+	local sound = handle and handle:FindFirstChild(soundName)
+
+	if sound and sound:IsA("Sound") then
+		sound:Play()
+	end
+end
+local reloading = false
+local playerGui = player:WaitForChild("PlayerGui")
+
+local function connectMobileReload()
+	local gui = playerGui:WaitForChild("FPSMobileControls", 10)
+	if not gui then
+		return
+	end
+
+	local request = gui:WaitForChild("MobileReloadRequest", 10)
+	if not request then
+		return
+	end
+
+	request.Event:Connect(function()
+		if equippedTool and not reloading then
+			reloading = true
+			playGunSound(equippedTool, "ReloadSound")
+			reloadEvent:FireServer()
+
+			task.delay(2.1, function()
+				reloading = false
+			end)
+		end
+	end)
+end
+
+task.spawn(connectMobileReload)
+
+local function setupTool(tool)
+	if not tool:IsA("Tool") then
+		return
+	end
+
+	tool.Equipped:Connect(function()
+		equippedTool = tool
+		reloading = false
+	end)
+
+	tool.Unequipped:Connect(function()
+		if equippedTool == tool then
+			equippedTool = nil
+			reloading = false
+		end
+	end)
+
+	tool.Activated:Connect(function()
+		if equippedTool ~= tool or reloading then
+			return
+		end
+
+		local camera = workspace.CurrentCamera
+		if not camera then
+			return
+		end
+
+		local targetPosition =
+			camera.CFrame.Position + camera.CFrame.LookVector * 1000
+		shootEvent:FireServer(targetPosition)
+	end)
+end
+
+local function setupCharacter(character)
+	equippedTool = nil
+
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			setupTool(child)
+		end
+	end)
+
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Tool") then
+			setupTool(child)
+		end
+	end
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.R and equippedTool and not reloading then
+		reloading = true
+
+		playGunSound(equippedTool, "ReloadSound")
+		reloadEvent:FireServer()
+
+		task.delay(2.1, function()
+			reloading = false
+		end)
+	end
+end)
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+The FPSServer script used for the support of the systems in the server.
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+
+local fpsSystem = ReplicatedStorage:WaitForChild("FPSSystem")
+local shootEvent = fpsSystem:WaitForChild("Shoot")
+local hitmarkerEvent = fpsSystem:WaitForChild("Hitmarker")
+local reloadEvent = fpsSystem:WaitForChild("Reload")
+local ammoUpdateEvent = fpsSystem:WaitForChild("AmmoUpdate")
+
+local MAGAZINE_SIZE = 30
+local STARTING_RESERVE = 90
+local DAMAGE = 25
+local RANGE = 1000
+local RELOAD_TIME = 2
+
+local ammo = {}
+
+local function setupPlayer(player)
+	ammo[player] = {
+		magazine = MAGAZINE_SIZE,
+		reserve = STARTING_RESERVE,
+		reloading = false,
+		lastShot = 0,
+	}
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+
+Players.PlayerRemoving:Connect(function(player)
+	ammo[player] = nil
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	setupPlayer(player)
+end
+
+shootEvent.OnServerEvent:Connect(function(player, targetPosition)
+	local character = player.Character
+	local data = ammo[player]
+
+	if not character or not data or data.reloading then
+		return
+	end
+
+	local tool = character:FindFirstChild("Gun")
+	if not tool or not tool:IsA("Tool") then
+		return
+	end
+
+	if typeof(targetPosition) ~= "Vector3" then
+		return
+	end
+
+	if data.magazine <= 0 then
+		return
+	end
+
+	local now = os.clock()
+	if now - data.lastShot < 0.12 then
+		return
+	end
+
+	data.lastShot = now
+	data.magazine -= 1
+	shootEvent:FireClient(player)
+	local handle = tool:FindFirstChild("Handle")
+	local gunSound = handle and handle:FindFirstChild("GunshotSound")
+
+	if gunSound and gunSound:IsA("Sound") then
+		gunSound:Play()
+	end
+	ammoUpdateEvent:FireClient(player, data.magazine, data.reserve)
+
+	local head = character:FindFirstChild("Head")
+	if not head then
+		return
+	end
+
+	local origin = head.Position
+	local offset = targetPosition - origin
+
+	if offset.Magnitude < 0.01 then
+		return
+	end
+
+	local direction = offset.Unit * RANGE
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {character}
+
+	local result = workspace:Raycast(origin, direction, params)
+	local endPosition = origin + direction
+
+	if result then
+		endPosition = result.Position
+
+		local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
+		local humanoid = hitModel and hitModel:FindFirstChildOfClass("Humanoid")
+
+		if humanoid and humanoid.Health > 0 and hitModel ~= character then
+			humanoid:TakeDamage(DAMAGE)
+			hitmarkerEvent:FireClient(player)
+		end
+	end
+
+	-- Thin, quick, modern bullet tracer
+	local distance = (endPosition - origin).Magnitude
+
+	if distance > 0 then
+		local tracer = Instance.new("Part")
+		tracer.Name = "BulletTracer"
+		tracer.Anchored = true
+		tracer.CanCollide = false
+		tracer.CanTouch = false
+		tracer.CanQuery = false
+		tracer.CastShadow = false
+		tracer.Material = Enum.Material.Neon
+		tracer.Color = Color3.fromRGB(255, 220, 130)
+		tracer.Transparency = 0.15
+		tracer.Size = Vector3.new(0.025, 0.025, distance)
+		tracer.CFrame = CFrame.lookAt(
+			(origin + endPosition) / 2,
+			endPosition
+		)
+		tracer.Parent = workspace
+
+		Debris:AddItem(tracer, 0.035)
+	end
+end)
+
+reloadEvent.OnServerEvent:Connect(function(player)
+	local data = ammo[player]
+	local character = player.Character
+
+	if not data or not character or data.reloading then
+		return
+	end
+
+	local tool = character:FindFirstChild("Gun")
+	if not tool or not tool:IsA("Tool") then
+		return
+	end
+
+	if data.magazine >= MAGAZINE_SIZE or data.reserve <= 0 then
+		return
+	end
+
+	data.reloading = true
+
+	task.delay(RELOAD_TIME, function()
+		if not player.Parent or ammo[player] ~= data then
+			return
+		end
+
+		local currentCharacter = player.Character
+		local currentTool = currentCharacter
+			and currentCharacter:FindFirstChild("Gun")
+
+		if currentTool and currentTool:IsA("Tool") then
+			local needed = MAGAZINE_SIZE - data.magazine
+			local loaded = math.min(needed, data.reserve)
+
+			data.magazine += loaded
+			data.reserve -= loaded
+
+			ammoUpdateEvent:FireClient(
+				player,
+				data.magazine,
+				data.reserve
+			)
+		end
+
+		data.reloading = false
+	end)
+end)
+
+ammoUpdateEvent.OnServerEvent:Connect(function(player, action)
+	if action ~= "Request" then
+		return
+	end
+
+	local data = ammo[player]
+	local character = player.Character
+	local tool = character and character:FindFirstChild("Gun")
+
+	if data and tool and tool:IsA("Tool") then
+		ammoUpdateEvent:FireClient(
+			player,
+			data.magazine,
+			data.reserve
+		)
+	end
+end)
+
+FPSCroshair script. Used for the crosshair in the middle of the screen and used for the crosshair to turn red when hitting something.
+
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local hitmarkerEvent = ReplicatedStorage:WaitForChild("FPSSystem"):WaitForChild("Hitmarker")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "FPSCrosshairUI"
+gui.IgnoreGuiInset = true
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local crosshair = Instance.new("Frame")
+crosshair.Name = "Crosshair"
+crosshair.Size = UDim2.fromOffset(0, 0)
+crosshair.Position = UDim2.fromScale(0.5, 0.5)
+crosshair.AnchorPoint = Vector2.new(0.5, 0.5)
+crosshair.BackgroundTransparency = 1
+crosshair.Parent = gui
+
+local lines = {}
+
+local function makeLine(name, size, position)
+	local line = Instance.new("Frame")
+	line.Name = name
+	line.Size = size
+	line.Position = position
+	line.AnchorPoint = Vector2.new(0.5, 0.5)
+	line.BackgroundColor3 = Color3.new(1, 1, 1)
+	line.BorderSizePixel = 0
+	line.Parent = crosshair
+	table.insert(lines, line)
+end
+
+makeLine("Top", UDim2.fromOffset(2, 8), UDim2.fromOffset(0, -7))
+makeLine("Bottom", UDim2.fromOffset(2, 8), UDim2.fromOffset(0, 7))
+makeLine("Left", UDim2.fromOffset(8, 2), UDim2.fromOffset(-7, 0))
+makeLine("Right", UDim2.fromOffset(8, 2), UDim2.fromOffset(7, 0))
+
+local equipped = false
+local hitId = 0
+
+local function setCrosshairColor(color)
+	for _, line in ipairs(lines) do
+		line.BackgroundColor3 = color
+	end
+end
+
+local function updateEquipped()
+	local character = player.Character
+	local hasTool = character and character:FindFirstChildOfClass("Tool")
+
+	equipped = hasTool ~= nil
+	crosshair.Visible = equipped
+
+	UserInputService.MouseIconEnabled = not equipped
+	UserInputService.MouseBehavior = equipped
+		and Enum.MouseBehavior.LockCenter
+		or Enum.MouseBehavior.Default
+
+	if not equipped then
+		setCrosshairColor(Color3.new(1, 1, 1))
+	end
+end
+
+local function setupCharacter(character)
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			updateEquipped()
+		end
+	end)
+
+	character.ChildRemoved:Connect(function(child)
+		if child:IsA("Tool") then
+			task.defer(updateEquipped)
+		end
+	end)
+
+	updateEquipped()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+else
+	crosshair.Visible = false
+end
+
+hitmarkerEvent.OnClientEvent:Connect(function()
+	if not equipped then
+		return
+	end
+
+	hitId += 1
+	local thisHit = hitId
+
+	-- Hide the white crosshair and show a red hitmarker.
+	crosshair.Visible = true
+	setCrosshairColor(Color3.fromRGB(255, 40, 40))
+
+	for _, line in ipairs(lines) do
+		line.Size = UDim2.fromOffset(10, 2)
+	end
+
+	lines[1].Size = UDim2.fromOffset(2, 10)
+	lines[2].Size = UDim2.fromOffset(2, 10)
+
+	task.delay(0.18, function()
+		if thisHit ~= hitId then
+			return
+		end
+
+		for _, line in ipairs(lines) do
+			line.Size = UDim2.fromOffset(2, 8)
+		end
+
+		lines[3].Size = UDim2.fromOffset(8, 2)
+		lines[4].Size = UDim2.fromOffset(8, 2)
+
+		setCrosshairColor(Color3.new(1, 1, 1))
+		crosshair.Visible = equipped
+	end)
+end)
+
+FPSMobileControls script. Used for the support of mobile gameplay.
+
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Only show these controls on touch devices.
+if not UserInputService.TouchEnabled then
+	return
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "FPSMobileControls"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+
+
+local function createButton(name, text, size, position)
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.Text = text
+	button.Size = size
+	button.Position = position
+	button.BackgroundColor3 = Color3.fromRGB(25, 32, 43)
+	button.BackgroundTransparency = 0.08
+	button.TextColor3 = Color3.fromRGB(245, 248, 255)
+	button.TextScaled = true
+	button.Font = Enum.Font.GothamBold
+	button.AutoButtonColor = true
+	button.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 18)
+	corner.Parent = button
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 1.5
+	stroke.Color = Color3.fromRGB(77, 105, 139)
+	stroke.Transparency = 0.15
+	stroke.Parent = button
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 5)
+	padding.PaddingRight = UDim.new(0, 5)
+	padding.Parent = button
+
+	return button
+end
+
+
+local fireButton = createButton(
+	"FireButton",
+	"FIRE",
+	UDim2.fromOffset(85, 85),
+	UDim2.new(1, -115, 1, -180)
+)
+fireButton.BackgroundColor3 = Color3.fromRGB(36, 75, 112)
+fireButton.Size = UDim2.fromOffset(92, 92)
+
+local reloadButton = createButton(
+	"ReloadButton",
+	"RELOAD",
+	UDim2.fromOffset(70, 70),
+	UDim2.new(1, -200, 1, -115)
+)
+reloadButton.Size = UDim2.fromOffset(76, 76)
+reloadButton.Position = UDim2.new(1, -205, 1, -115)
+
+-- The existing FPSWeapons script handles shooting and reloading.
+-- Activating the equipped Tool fires a shot.
+-- For mobile, use Tool:Activate() to trigger its Activated event.
+local function updateButtonVisibility()
+	local character = player.Character
+	local gun = character and character:FindFirstChild("Gun")
+	local equipped = gun ~= nil and gun:IsA("Tool")
+
+	fireButton.Visible = equipped
+	reloadButton.Visible = equipped
+end
+local function getGun()
+	local character = player.Character
+	if not character then
+		return nil
+	end
+
+	local tool = character:FindFirstChild("Gun")
+	if tool and tool:IsA("Tool") then
+		return tool
+	end
+
+	return nil
+end
+
+fireButton.Activated:Connect(function()
+	local gun = getGun()
+	if gun then
+		gun:Activate()
+	end
+end)
+
+reloadButton.Activated:Connect(function()
+	-- Simulate the R key through a BindableEvent handled below.
+	local event = gui:FindFirstChild("MobileReloadRequest")
+	if event then
+		event:Fire()
+	end
+end)
+
+local reloadRequest = Instance.new("BindableEvent")
+reloadRequest.Name = "MobileReloadRequest"
+reloadRequest.Parent = gui
+
+-- Let FPSWeapons listen for mobile reload requests.
+local function setupCharacter(character)
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			updateButtonVisibility()
+		end
+	end)
+
+	character.ChildRemoved:Connect(function(child)
+		if child:IsA("Tool") then
+			updateButtonVisibility()
+		end
+	end)
+
+	updateButtonVisibility()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+updateButtonVisibility()
+
+FPSAiming script. Used for aiming
+
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Aim settings
+local NORMAL_FOV = 70
+local AIM_FOV = 52
+local TWEEN_TIME = 0.18
+
+local aiming = false
+local equipped = false
+local activeTween
+local currentCamera = workspace.CurrentCamera
+
+-- Mobile aim button
+local gui = Instance.new("ScreenGui")
+gui.Name = "FPSAimUI"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+
+local aimButton = Instance.new("TextButton")
+aimButton.Name = "AimButton"
+aimButton.Size = UDim2.fromOffset(72, 72)
+aimButton.Position = UDim2.new(1, -205, 1, -205)
+aimButton.BackgroundColor3 = Color3.fromRGB(25, 32, 43)
+aimButton.BackgroundTransparency = 0.08
+aimButton.Text = "AIM"
+aimButton.TextColor3 = Color3.new(1, 1, 1)
+aimButton.TextSize = 20
+aimButton.Font = Enum.Font.GothamBold
+aimButton.Visible = false
+aimButton.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 18)
+corner.Parent = aimButton
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(77, 145, 210)
+stroke.Thickness = 2
+stroke.Parent = aimButton
+
+local function setAiming(state)
+	aiming = state and equipped
+
+	if activeTween then
+		activeTween:Cancel()
+	end
+
+	currentCamera = workspace.CurrentCamera
+	if not currentCamera then
+		return
+	end
+
+	local targetFOV = aiming and AIM_FOV or NORMAL_FOV
+
+	activeTween = TweenService:Create(
+		currentCamera,
+		TweenInfo.new(
+			TWEEN_TIME,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		),
+		{FieldOfView = targetFOV}
+	)
+
+	activeTween:Play()
+
+	aimButton.Text = aiming and "AIM ON" or "AIM"
+	aimButton.BackgroundColor3 = aiming
+		and Color3.fromRGB(36, 75, 112)
+		or Color3.fromRGB(25, 32, 43)
+end
+
+local function updateTool()
+	local character = player.Character
+	local tool = character and character:FindFirstChild("Gun")
+	equipped = tool ~= nil and tool:IsA("Tool")
+
+	aimButton.Visible = equipped and UserInputService.TouchEnabled
+
+	if not equipped then
+		setAiming(false)
+	end
+end
+
+-- PC: hold right mouse button to aim
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or UserInputService.TouchEnabled then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton2
+		and equipped then
+		setAiming(true)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton2
+		and not UserInputService.TouchEnabled then
+		setAiming(false)
+	end
+end)
+
+-- Mobile: tap to toggle aim
+aimButton.Activated:Connect(function()
+	if equipped then
+		setAiming(not aiming)
+	end
+end)
+
+local function setupCharacter(character)
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			updateTool()
+		end
+	end)
+
+	character.ChildRemoved:Connect(function(child)
+		if child:IsA("Tool") then
+			updateTool()
+		end
+	end)
+
+	updateTool()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	currentCamera = workspace.CurrentCamera
+end)
+
+FPSReload UI. The animted loading UI at the bottom of the screen.
+
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+local reloadEvent = ReplicatedStorage:WaitForChild("FPSSystem"):WaitForChild("Reload")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "FPSReloadUI"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local container = Instance.new("Frame")
+container.Name = "ReloadContainer"
+container.Size = UDim2.fromOffset(260, 58)
+container.Position = UDim2.new(0.5, -130, 0.72, 0)
+container.BackgroundColor3 = Color3.fromRGB(15, 19, 26)
+container.BackgroundTransparency = 0.08
+container.Visible = false
+container.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = container
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(65, 125, 180)
+stroke.Thickness = 1.5
+stroke.Parent = container
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 25)
+title.Position = UDim2.fromOffset(10, 5)
+title.BackgroundTransparency = 1
+title.Text = "RELOADING"
+title.TextColor3 = Color3.fromRGB(225, 235, 245)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = container
+
+local barBackground = Instance.new("Frame")
+barBackground.Size = UDim2.new(1, -20, 0, 7)
+barBackground.Position = UDim2.fromOffset(10, 37)
+barBackground.BackgroundColor3 = Color3.fromRGB(42, 49, 60)
+barBackground.BorderSizePixel = 0
+barBackground.Parent = container
+
+local barCorner = Instance.new("UICorner")
+barCorner.CornerRadius = UDim.new(1, 0)
+barCorner.Parent = barBackground
+
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(0, 0, 1, 0)
+bar.BackgroundColor3 = Color3.fromRGB(75, 170, 255)
+bar.BorderSizePixel = 0
+bar.Parent = barBackground
+
+local fillCorner = Instance.new("UICorner")
+fillCorner.CornerRadius = UDim.new(1, 0)
+fillCorner.Parent = bar
+
+local busy = false
+local RELOAD_TIME = 2
+
+local function isGunEquipped()
+	local character = player.Character
+	local gun = character and character:FindFirstChild("Gun")
+	return gun ~= nil and gun:IsA("Tool")
+end
+
+local function playReloadUI()
+	if busy or not isGunEquipped() then
+		return
+	end
+
+	busy = true
+	container.Visible = true
+	bar.Size = UDim2.new(0, 0, 1, 0)
+	title.Text = "RELOADING"
+
+	local tween = TweenService:Create(
+		bar,
+		TweenInfo.new(RELOAD_TIME, Enum.EasingStyle.Linear),
+		{Size = UDim2.new(1, 0, 1, 0)}
+	)
+	tween:Play()
+
+	task.wait(RELOAD_TIME)
+
+	tween:Cancel()
+	container.Visible = false
+	busy = false
+end
+
+-- Keyboard reload (R)
+game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
+	if not processed and input.KeyCode == Enum.KeyCode.R then
+		playReloadUI()
+	end
+end)
+
+-- Mobile reload button signal, if present
+local function connectMobileReload()
+	local mobileGui = player.PlayerGui:FindFirstChild("FPSMobileControls")
+	if not mobileGui then
+		return
+	end
+
+	local request = mobileGui:FindFirstChild("MobileReloadRequest")
+	if request and request:IsA("BindableEvent") then
+		request.Event:Connect(playReloadUI)
+	end
+end
+
+player.PlayerGui.ChildAdded:Connect(function(child)
+	if child.Name == "FPSMobileControls" then
+		task.wait()
+		connectMobileReload()
+	end
+end)
+
+connectMobileReload()
+
+FPSAmmoUI script. USed for the bottom left UI which shows how many rounds are left in the magazine.
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+local ammoUpdate = ReplicatedStorage
+	:WaitForChild("FPSSystem")
+	:WaitForChild("AmmoUpdate")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "FPSAmmoUI"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local panel = Instance.new("Frame")
+panel.Name = "AmmoPanel"
+panel.Size = UDim2.fromOffset(205, 100)
+panel.Position = UDim2.new(0, 20, 1, -120)
+panel.BackgroundColor3 = Color3.fromRGB(16, 23, 32)
+panel.BackgroundTransparency = 0.08
+panel.BorderSizePixel = 0
+panel.Visible = false
+panel.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = panel
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(65, 105, 145)
+stroke.Thickness = 1.2
+stroke.Transparency = 0.2
+stroke.Parent = panel
+
+local heading = Instance.new("TextLabel")
+heading.Position = UDim2.fromOffset(12, 7)
+heading.Size = UDim2.new(1, -24, 0, 17)
+heading.BackgroundTransparency = 1
+heading.Text = "AMMUNITION"
+heading.TextColor3 = Color3.fromRGB(150, 174, 198)
+heading.Font = Enum.Font.GothamBold
+heading.TextSize = 11
+heading.TextXAlignment = Enum.TextXAlignment.Left
+heading.Parent = panel
+
+local magazine = Instance.new("TextLabel")
+magazine.Position = UDim2.fromOffset(10, 24)
+magazine.Size = UDim2.fromOffset(83, 43)
+magazine.BackgroundTransparency = 1
+magazine.Text = "30"
+magazine.TextColor3 = Color3.fromRGB(245, 249, 255)
+magazine.Font = Enum.Font.GothamBold
+magazine.TextSize = 34
+magazine.TextXAlignment = Enum.TextXAlignment.Left
+magazine.Parent = panel
+
+local reserve = Instance.new("TextLabel")
+reserve.Position = UDim2.fromOffset(95, 35)
+reserve.Size = UDim2.fromOffset(95, 25)
+reserve.BackgroundTransparency = 1
+reserve.Text = "/ 90"
+reserve.TextColor3 = Color3.fromRGB(130, 154, 178)
+reserve.Font = Enum.Font.GothamMedium
+reserve.TextSize = 20
+reserve.TextXAlignment = Enum.TextXAlignment.Left
+reserve.Parent = panel
+
+local barBackground = Instance.new("Frame")
+barBackground.Position = UDim2.fromOffset(12, 72)
+barBackground.Size = UDim2.new(1, -24, 0, 4)
+barBackground.BackgroundColor3 = Color3.fromRGB(43, 56, 70)
+barBackground.BorderSizePixel = 0
+barBackground.Parent = panel
+
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(1, 0, 1, 0)
+bar.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+bar.BorderSizePixel = 0
+bar.Parent = barBackground
+
+local hint = Instance.new("TextLabel")
+hint.Position = UDim2.fromOffset(12, 80)
+hint.Size = UDim2.new(1, -24, 0, 14)
+hint.BackgroundTransparency = 1
+hint.Text = "R   RELOAD"
+hint.TextColor3 = Color3.fromRGB(125, 148, 170)
+hint.Font = Enum.Font.GothamMedium
+hint.TextSize = 10
+hint.TextXAlignment = Enum.TextXAlignment.Left
+hint.Parent = panel
+
+local function updateAmmo(mag, res)
+	magazine.Text = tostring(mag)
+	reserve.Text = "/ " .. tostring(res)
+
+	local ratio = math.clamp(mag / 30, 0, 1)
+	bar.Size = UDim2.new(ratio, 0, 1, 0)
+
+	if mag <= 5 then
+		magazine.TextColor3 = Color3.fromRGB(255, 90, 90)
+		bar.BackgroundColor3 = Color3.fromRGB(255, 75, 75)
+	elseif mag <= 10 then
+		magazine.TextColor3 = Color3.fromRGB(255, 190, 85)
+		bar.BackgroundColor3 = Color3.fromRGB(255, 175, 70)
+	else
+		magazine.TextColor3 = Color3.fromRGB(245, 249, 255)
+		bar.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+	end
+end
+
+local function checkTool()
+	local character = player.Character
+	local tool = character and character:FindFirstChild("Gun")
+
+	panel.Visible = tool ~= nil and tool:IsA("Tool")
+
+	if panel.Visible then
+		ammoUpdate:FireServer("Request")
+	end
+end
+
+ammoUpdate.OnClientEvent:Connect(updateAmmo)
+
+local function setupCharacter(character)
+	character.ChildAdded:Connect(checkTool)
+	character.ChildRemoved:Connect(checkTool)
+	checkTool()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+FPSRecoil. Used for the recoil in the model.
+
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local shootEvent = ReplicatedStorage:WaitForChild("FPSSystem"):WaitForChild("Shoot")
+
+local equipped = false
+local recoil = 0
+local recoverySpeed = 12
+local recoilPerShot = 0.65
+local maxRecoil = 4
+
+local function checkTool()
+	local character = player.Character
+	local gun = character and character:FindFirstChild("Gun")
+	equipped = gun ~= nil and gun:IsA("Tool")
+
+	if not equipped then
+		recoil = 0
+	end
+end
+
+local function setupCharacter(character)
+	character.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			checkTool()
+		end
+	end)
+
+	character.ChildRemoved:Connect(function(child)
+		if child:IsA("Tool") then
+			checkTool()
+		end
+	end)
+
+	checkTool()
+end
+
+player.CharacterAdded:Connect(setupCharacter)
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+
+-- Add recoil when the player fires.
+shootEvent.OnClientEvent:Connect(function()
+	if equipped then
+		recoil = math.min(recoil + recoilPerShot, maxRecoil)
+	end
+end)
+
+-- Smoothly apply and recover camera recoil.
+RunService:BindToRenderStep(
+	"FPSCameraRecoil",
+	Enum.RenderPriority.Camera.Value + 1,
+	function(dt)
+		if not equipped then
+			return
+		end
+
+		local camera = workspace.CurrentCamera
+		if not camera then
+			return
+		end
+
+		local applied = math.min(recoil, recoverySpeed * dt)
+		recoil -= applied
+
+		camera.CFrame = camera.CFrame * CFrame.Angles(
+			math.rad(-applied),
+			0,
+			0
+		)
+	end
+)
+
+
+End of scripts.
